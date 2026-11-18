@@ -1,0 +1,32 @@
+services:
+  - type: web
+    name: whatsapp-bot
+    runtime: docker
+    plan: starter        # free plan hulala baada ya dakika 15, bot itakata
+    healthCheckPath: /health
+    envVars:
+      - key: APPLICATION_NAME
+        value: WhatsappBot
+      - key: API_KEY
+        generateValue: true
+      - key: BOT_PASSWORD
+        sync: false
+      - key: QR_TERMINAL
+        value: "true"
+      - key: DB_SSL
+        value: "false"   # internal connection haihitaji SSL
+      - key: DB_HOST
+        fromDatabase: { name: whatsapp-db, property: host }
+      - key: DB_PORT
+        fromDatabase: { name: whatsapp-db, property: port }
+      - key: DB_USERNAME
+        fromDatabase: { name: whatsapp-db, property: user }
+      - key: DB_PASSWORD
+        fromDatabase: { name: whatsapp-db, property: password }
+      - key: DB_NAME
+        fromDatabase: { name: whatsapp-db, property: database }
+
+databases:
+  - name: whatsapp-db
+    plan: basic-256mb
+    databaseName: whatsapp
