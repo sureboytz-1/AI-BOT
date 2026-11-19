@@ -339,3 +339,120 @@ export abstract class WhatsappBaseService {
                 '3. *.muda* - Saa na tarehe ya Tanzania',
                 '4. *.owner* - Taarifa za mmiliki',
                 '5. *#sticker* - Tuma picha yenye caption #sticker',
+                '6. *.vv* / *.vvo* / *#dvo* - Reply View Once kuifungua',
+                '',
+                '_Powered by SUREBOY_',
+            ].join('\n')
+            await this.sendMessage(remoteJid, { text: menuText }, { quoted: message })
+            return true
+        }
+
+        if (cmd === '.ping' || cmd === '#ping') {
+            await this.sendMessage(remoteJid, { text: 'Pong! SUREBOY Bot iko hewani na inafanya kazi kikamilifu.' }, { quoted: message })
+            return true
+        }
+
+        if (cmd === '.muda' || cmd === '#muda') {
+            const now = new Date().toLocaleString('sw-TZ', { timeZone: 'Africa/Dar_es_Salaam' })
+            await this.sendMessage(remoteJid, { text: `Saa na tarehe (Dar es Salaam): *${now}*` }, { quoted: message })
+            return true
+        }
+
+        if (cmd === '.owner' || cmd === '#owner') {
+            await this.sendMessage(remoteJid, { text: 'Bot hii inamilikiwa na kusimamiwa na *SUREBOY*.' }, { quoted: message })
+            return true
+        }
+
+        if (cmd === 'mambo' || cmd === 'habari' || cmd === 'hi' || cmd === 'hello' || cmd === 'niaje' || cmd === 'salamu') {
+            const greetText = [
+                `Habari *${message.pushName || 'Rafiki'}*! Asante kwa kuwasiliana nasi.`,
+                'Nimepokea ujumbe wako. Andika *.menu* kuona huduma zinazopatikana au subiri kidogo nitakujibu punde.',
+            ].join('\n')
+            await this.sendMessage(remoteJid, { text: greetText }, { quoted: message })
+            return true
+        }
+
+        return false
+    }
+
+    protected abstract removeSession(): Promise<void>
+
+    async logout() {
+        this.checkIsConnected()
+
+        await this.socket.logout()
+
+        await this.removeSession()
+
+        delete this.contactConnected
+        await this.reInitialize()
+
+        return true
+    }
+
+    getStatus(): StatusWhatsappService {
+        return {
+            isConnected: !this.qrcode && !!this.contactConnected?.id,
+            contactConnected: this.contactConnected,
+            qrcode: this.qrcode,
+        }
+    }
+
+    protected async sendMessage(
+        phoneNumber: string,
+        content: AnyMessageContent,
+        options?: MiscMessageGenerationOptions,
+        recursive?: number,
+    ): Promise<WhatsappMessage> {
+        try {
+            this.checkIsConnected()
+
+            return await promiseTimeout(1000 * 15, async (resolve, reject) => {
+                try {
+                    const jid = formatToJid(phoneNumber)
+                    await this.socket.presenceSubscribe(jid)
+                    await delay(1 * 1000)
+                    await this.socket.sendPresenceUpdate('composing', jid)
+                    await delay(2 * 1000)
+                    await this.socket.sendPresenceUpdate('paused', jid)
+                    await delay(1 * 1000)
+                    const message = await this.socket.sendMessage(jid, content, options)
+                    resolve(message)
+                } catch (error) {
+                    reject(error)
+                }
+            })
+        } catch (error) {
+            if (this.isShouldResend(error) && (recursive || 0) < 20) {
+                await delay(500)
+                return await this.sendMessage(phoneNumber, content, options, (recursive || 0) + 1)
+            }
+
+            throw error
+        }
+    }
+
+    protected abstract makeAuthState(): Promise<AuthState>
+
+    private async createNewSocket(): Promise<WhatsappSocket> {
+        const { state, saveCreds } = await this.makeAuthState()
+        const { version } = await fetchLatestBaileysVersion()
+
+        const socket = makeWASocket({
+            version: version,
+            auth: state,
+            logger: pino({ level: 'silent' }) as any,
+            browser: Browsers.ubuntu('Chrome'),
+            syncFullHistory: false,
+            markOnlineOnConnect: false,
+        })
+
+        socket.ev.on('connection.update', update => this.onConnectionUpdate(socket, state, update))
+        socket.ev.on('creds.update', saveCreds)
+        socket.ev.on('messages.upsert', chats => this.onNewMessage(chats))
+        socket.ev.on('messages.update', chats => this.onUpdateMessage(chats))
+
+        return socket
+    }
+
+    protected newMessageListeners = async (message: WhatsappMessage):
