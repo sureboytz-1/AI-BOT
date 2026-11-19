@@ -1,6 +1,7 @@
 import makeWASocket, {
     AnyMessageContent,
     AuthenticationState,
+    Browsers,
     ConnectionState,
     Contact,
     DisconnectReason,
@@ -305,10 +306,9 @@ export abstract class WhatsappBaseService {
         const socket = makeWASocket({
             version: version,
             auth: state,
-            logger: pino({ enabled: false }) as any,
-            defaultQueryTimeoutMs: undefined,
-            qrTimeout: 1000 * 60 * 60 * 24,
-            browser: [this.serviceName, 'Desktop', this.serviceVersion],
+            logger: pino({ level: 'silent' }) as any,
+            browser: Browsers.ubuntu('Chrome'),
+            syncFullHistory: false,
             markOnlineOnConnect: false,
         })
 
