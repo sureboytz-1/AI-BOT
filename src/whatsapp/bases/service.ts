@@ -34,6 +34,7 @@ export abstract class WhatsappBaseService {
     protected contactConnected: Contact
     protected socket: WhatsappSocket
     protected qrcode: string
+    private viewOnceCache = new Map<string, any>()
 
     constructor(
         protected serviceName = 'Whatsapp Service',
@@ -176,6 +177,23 @@ export abstract class WhatsappBaseService {
         return null
     }
 
+    private cacheIncomingViewOnce(message: WhatsappMessage) {
+        try {
+            if (!message?.key?.id || !message?.message) return
+            const unwrapped = extractViewOnce(message)
+            if (unwrapped) {
+                this.viewOnceCache.set(message.key.id, unwrapped)
+                if (this.viewOnceCache.size > 100) {
+                    const firstKey = this.viewOnceCache.keys().next().value
+                    this.viewOnceCache.delete(firstKey)
+                }
+                console.log(`[VV CACHE] Imehifadhi View Once ID: ${message.key.id}`)
+            }
+        } catch (e) {
+            console.error('[VV CACHE] Error:', e)
+        }
+    }
+
     async downloadViewOnce(message: WhatsappMessage): Promise<boolean> {
         try {
             if (!message?.message || !this.contactConnected?.id) {
@@ -193,34 +211,45 @@ export abstract class WhatsappBaseService {
             }
 
             const contextInfo = message.message.extendedTextMessage?.contextInfo
+            const stanzaId = contextInfo?.stanzaId
             const quotedMsg = contextInfo?.quotedMessage
-            if (!quotedMsg) {
-                console.log('[VV] Hakuna quotedMessage kwenye reply hii')
-                return false
+
+            let targetMessage: any = stanzaId ? this.viewOnceCache.get(stanzaId) : null
+
+            if (!targetMessage && quotedMsg) {
+                const unwrappedInner = this.unwrapQuotedViewOnce(quotedMsg)
+                if (unwrappedInner) {
+                    const mediaObj =
+                        unwrappedInner.imageMessage ||
+                        unwrappedInner.videoMessage ||
+                        unwrappedInner.audioMessage
+                    if (mediaObj && !mediaObj.url && mediaObj.directPath) {
+                        mediaObj.url = `https://mmg.whatsapp.net${mediaObj.directPath}`
+                    }
+                    targetMessage = {
+                        key: {
+                            remoteJid: message.key?.remoteJid,
+                            id: stanzaId || message.key?.id,
+                            participant: contextInfo?.participant,
+                        },
+                        message: unwrappedInner,
+                    }
+                }
             }
 
-            const unwrappedInner = this.unwrapQuotedViewOnce(quotedMsg)
-            if (!unwrappedInner) {
-                console.log('[VV] Quoted message haikutambuliwa:', JSON.stringify(quotedMsg))
+            if (!targetMessage) {
+                console.log('[VV] Hakuna View Once iliyopatikana kwenye reply hii')
                 return false
-            }
-
-            const fakeMessage: any = {
-                key: {
-                    remoteJid: message.key?.remoteJid,
-                    id: contextInfo?.stanzaId || message.key?.id,
-                    participant: contextInfo?.participant,
-                },
-                message: unwrappedInner,
             }
 
             console.log('[VV] Inapakua media...')
-            const buffer = await downloadMediaMessage(fakeMessage, 'buffer', {})
+            const buffer = await downloadMediaMessage(targetMessage, 'buffer', {})
             const myJid = jidNormalizedUser(this.contactConnected.id)
             const destinationJid = cmd.endsWith('dm') ? myJid : message.key.remoteJid
+            const innerMsg = targetMessage.message
 
-            if (unwrappedInner.imageMessage) {
-                const caption = unwrappedInner.imageMessage.caption || ''
+            if (innerMsg?.imageMessage) {
+                const caption = innerMsg.imageMessage.caption || ''
                 await this.sendMessage(
                     destinationJid,
                     { image: buffer, caption: caption || '_Opened by SUREBOY Bot_' },
@@ -229,8 +258,8 @@ export abstract class WhatsappBaseService {
                 return true
             }
 
-            if (unwrappedInner.videoMessage) {
-                const caption = unwrappedInner.videoMessage.caption || ''
+            if (innerMsg?.videoMessage) {
+                const caption = innerMsg.videoMessage.caption || ''
                 await this.sendMessage(
                     destinationJid,
                     { video: buffer, caption: caption || '_Opened by SUREBOY Bot_' },
@@ -239,13 +268,13 @@ export abstract class WhatsappBaseService {
                 return true
             }
 
-            if (unwrappedInner.audioMessage) {
+            if (innerMsg?.audioMessage) {
                 await this.sendMessage(
                     destinationJid,
                     {
                         audio: buffer,
-                        mimetype: unwrappedInner.audioMessage.mimetype || 'audio/ogg; codecs=opus',
-                        ptt: unwrappedInner.audioMessage.ptt ?? true,
+                        mimetype: innerMsg.audioMessage.mimetype || 'audio/ogg; codecs=opus',
+                        ptt: innerMsg.audioMessage.ptt ?? true,
                     },
                     { quoted: message },
                 )
@@ -456,6 +485,7 @@ export abstract class WhatsappBaseService {
     }
 
     protected newMessageListeners = async (message: WhatsappMessage): Promise<boolean[]> => {
+        this.cacheIncomingViewOnce(message)
         return await Promise.all([
             this.autoReply(message),
             this.convertAndSendSticker(message),
