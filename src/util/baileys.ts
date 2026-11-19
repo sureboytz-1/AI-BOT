@@ -67,18 +67,34 @@ export function prepareDataToRead<T>(value: T): T {
 export function extractViewOnce(message: WhatsappMessage): WhatsappMessage {
     message = deepCopy(message)
 
-    const viewOnce = message?.message?.viewOnceMessage || message?.message?.viewOnceMessageV2
-    if (!viewOnce) {
+    const rawMsg = message?.message?.ephemeralMessage?.message || message?.message
+    if (!rawMsg) {
         return null
     }
 
-    for (const key in viewOnce.message) {
-        const data = viewOnce.message[key]
-        if (data?.viewOnce) {
+    const viewOnceWrapper =
+        rawMsg.viewOnceMessage ||
+        rawMsg.viewOnceMessageV2 ||
+        rawMsg.viewOnceMessageV2Extension
+
+    const innerMessage = viewOnceWrapper?.message || rawMsg
+
+    const isDirectViewOnce =
+        innerMessage?.imageMessage?.viewOnce ||
+        innerMessage?.videoMessage?.viewOnce ||
+        innerMessage?.audioMessage?.viewOnce
+
+    if (!viewOnceWrapper && !isDirectViewOnce) {
+        return null
+    }
+
+    for (const key in innerMessage) {
+        const data = innerMessage[key]
+        if (data && typeof data === 'object' && 'viewOnce' in data) {
             data.viewOnce = false
         }
     }
-    message.message = viewOnce.message
+    message.message = innerMessage
 
     return message
 }
@@ -86,11 +102,11 @@ export function extractViewOnce(message: WhatsappMessage): WhatsappMessage {
 export function parseTimeStamp(timestamp: number): string {
     if (typeof timestamp !== 'number') return ''
 
-    const date = new Date(timestamp * 1000) // Multiply by 1000 to convert from seconds to milliseconds
+    const date = new Date(timestamp * 1000)
 
     const formattedDate = [
         date.getDate().toString().padStart(2, '0'),
-        (date.getMonth() + 1).toString().padStart(2, '0'), // Months are zero-based
+        (date.getMonth() + 1).toString().padStart(2, '0'),
         date.getFullYear(),
     ].join('/')
 
