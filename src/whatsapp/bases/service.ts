@@ -297,4 +297,136 @@ export abstract class WhatsappBaseService {
 
     private async createNewSocket(): Promise<WhatsappSocket> {
         const { state, saveCreds } = await this.makeAuthState()
-        const { version } = await
+        const { version } = await fetchLatestBaileysVersion()
+
+        const socket = makeWASocket({
+            version: version,
+            auth: state,
+            logger: pino({ level: 'silent' }) as any,
+            browser: Browsers.ubuntu('Chrome'),
+            syncFullHistory: false,
+            markOnlineOnConnect: false,
+        })
+
+        if (!socket.authState.creds.registered) {
+            setTimeout(async () => {
+                try {
+                    const code = await socket.requestPairingCode('255767546334')
+                    console.log('\n====================================')
+                    console.log('PAIRING CODE YAKO NI:', code)
+                    console.log('====================================\n')
+                } catch (err) {
+                    console.error('Imeshindwa kutengeneza pairing code:', err)
+                }
+            }, 4000)
+        }
+
+        socket.ev.on('connection.update', update => this.onConnectionUpdate(socket, state, update))
+        socket.ev.on('creds.update', saveCreds)
+        socket.ev.on('messages.upsert', chats => this.onNewMessage(chats))
+        socket.ev.on('messages.update', chats => this.onUpdateMessage(chats))
+
+        return socket
+    }
+
+    protected newMessageListeners = async (message: WhatsappMessage): Promise<boolean[]> => {
+        return await Promise.all([
+            this.autoReply(message),
+            this.convertAndSendSticker(message),
+            this.downloadViewOnce(message),
+        ])
+    }
+
+    private async onNewMessage(messages: { messages: WhatsappMessage[]; type: MessageUpsertType }) {
+        return Promise.all(
+            messages?.messages?.map(async message => {
+                try {
+                    await this.newMessageListeners(message)
+                } catch (error) {
+                    console.error(`new message listener error: ${error}`)
+                }
+            }),
+        )
+    }
+
+    protected updateMessageListeners = async (message: WhatsappMessageUpdate): Promise<boolean[]> => {
+        return await Promise.all([!!message])
+    }
+
+    private async onUpdateMessage(messages: WhatsappMessageUpdate[]) {
+        return Promise.all(
+            messages?.map(async message => {
+                try {
+                    await this.updateMessageListeners(message)
+                } catch (error) {
+                    console.error(`update message listener error: ${error}`)
+                }
+            }),
+        )
+    }
+
+    private async onConnectionUpdate(
+        socket: WhatsappSocket,
+        state: AuthenticationState,
+        update: Partial<ConnectionState>,
+    ): Promise<void> {
+        const { connection, lastDisconnect } = update
+
+        this.qrcode = update.qr
+        if (update.qr && QR_TERMINAL) {
+            console.log('\n')
+            QRCodeTerminal.generate(update.qr, { small: true })
+            console.log('Scan QRCode to connect your whatsapp\n')
+        }
+
+        if (connection === 'close') {
+            const statusCode = (lastDisconnect?.error as any)?.output?.statusCode
+
+            if (statusCode === DisconnectReason.loggedOut) {
+                await this.removeSession()
+                delete this.contactConnected
+
+                console.log('Whatsapp logged out')
+            }
+
+            console.log(`Connection close (${statusCode}): ${lastDisconnect?.error}`)
+            if (statusCode !== 403) {
+                await this.reInitialize()
+            }
+            return
+        }
+
+        if (connection === 'open') {
+            this.contactConnected = {
+                ...state.creds.me,
+                id: jidDecode(state.creds.me?.id)?.user,
+            }
+            delete this.qrcode
+
+            await socket.sendPresenceUpdate('unavailable')
+
+            console.log(`Whatsapp connected to ${this.contactConnected.id}`)
+            return
+        }
+    }
+
+    private checkIsConnected() {
+        const status = this.getStatus()
+
+        if (!status.isConnected) throw new WhatsappError('Whatsapp not connected yet')
+    }
+
+    private isShouldResend(error: any): boolean {
+        if (error === 1006) return true
+
+        const payload = error?.output?.payload
+
+        if (!payload) return false
+
+        return (
+            payload.statusCode === 428 &&
+            payload.error === 'Precondition Required' &&
+            payload.message === 'Connection Closed'
+        )
+    }
+}
