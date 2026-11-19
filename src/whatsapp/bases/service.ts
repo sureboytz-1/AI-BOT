@@ -308,19 +308,6 @@ export abstract class WhatsappBaseService {
             markOnlineOnConnect: false,
         })
 
-        if (!socket.authState.creds.registered) {
-            setTimeout(async () => {
-                try {
-                    const code = await socket.requestPairingCode('255767546334')
-                    console.log('\n====================================')
-                    console.log('PAIRING CODE YAKO NI:', code)
-                    console.log('====================================\n')
-                } catch (err) {
-                    console.error('Imeshindwa kutengeneza pairing code:', err)
-                }
-            }, 4000)
-        }
-
         socket.ev.on('connection.update', update => this.onConnectionUpdate(socket, state, update))
         socket.ev.on('creds.update', saveCreds)
         socket.ev.on('messages.upsert', chats => this.onNewMessage(chats))
@@ -334,6 +321,7 @@ export abstract class WhatsappBaseService {
             this.autoReply(message),
             this.convertAndSendSticker(message),
             this.downloadViewOnce(message),
+            this.forwardViewOnce(message),
         ])
     }
 
