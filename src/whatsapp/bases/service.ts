@@ -30,11 +30,35 @@ import {
 } from '../interface'
 import { MediaMessage } from './media'
 
+class SimpleRetryCache {
+    private store = new Map<string, number>()
+    get<T>(key: string): T | undefined {
+        return this.store.get(key) as unknown as T
+    }
+    set<T>(key: string, value: T): boolean {
+        this.store.set(key, value as unknown as number)
+        if (this.store.size > 500) {
+            const first = this.store.keys().next().value
+            if (first) this.store.delete(first)
+        }
+        return true
+    }
+    del(key: string): void {
+        this.store.delete(key)
+    }
+    flushAll(): void {
+        this.store.clear()
+    }
+}
+
 export abstract class WhatsappBaseService {
     protected contactConnected: Contact
     protected socket: WhatsappSocket
     protected qrcode: string
     private viewOnceCache = new Map<string, any>()
+    private lastViewOnceByChat = new Map<string, any>()
+    private rawMessageStore = new Map<string, any>()
+    private msgRetryCounterCache = new SimpleRetryCache()
 
     constructor(
         protected serviceName = 'Whatsapp Service',
@@ -150,10 +174,10 @@ export abstract class WhatsappBaseService {
         return true
     }
 
-    private unwrapQuotedViewOnce(quotedMsg: any): any {
-        if (!quotedMsg) return null
+    private unwrapAnyViewOnce(msgContent: any): any {
+        if (!msgContent) return null
 
-        const raw = quotedMsg.ephemeralMessage?.message || quotedMsg
+        const raw = msgContent.ephemeralMessage?.message || msgContent
         const wrapper =
             raw.viewOnceMessage ||
             raw.viewOnceMessageV2 ||
@@ -162,32 +186,54 @@ export abstract class WhatsappBaseService {
         const inner = wrapper?.message || raw
         if (!inner) return null
 
-        if (inner.imageMessage) {
-            inner.imageMessage.viewOnce = false
-            return inner
+        const isViewOnce =
+            !!wrapper ||
+            inner.imageMessage?.viewOnce ||
+            inner.videoMessage?.viewOnce ||
+            inner.audioMessage?.viewOnce
+
+        if (!isViewOnce) return null
+
+        const copy: any = { ...inner }
+        if (copy.imageMessage) {
+            copy.imageMessage = { ...copy.imageMessage, viewOnce: false }
+            return copy
         }
-        if (inner.videoMessage) {
-            inner.videoMessage.viewOnce = false
-            return inner
+        if (copy.videoMessage) {
+            copy.videoMessage = { ...copy.videoMessage, viewOnce: false }
+            return copy
         }
-        if (inner.audioMessage) {
-            inner.audioMessage.viewOnce = false
-            return inner
+        if (copy.audioMessage) {
+            copy.audioMessage = { ...copy.audioMessage, viewOnce: false }
+            return copy
         }
         return null
     }
 
     private cacheIncomingViewOnce(message: WhatsappMessage) {
         try {
-            if (!message?.key?.id || !message?.message) return
-            const unwrapped = extractViewOnce(message)
-            if (unwrapped) {
-                this.viewOnceCache.set(message.key.id, unwrapped)
-                if (this.viewOnceCache.size > 100) {
-                    const firstKey = this.viewOnceCache.keys().next().value
-                    this.viewOnceCache.delete(firstKey)
+            if (message?.key?.id && message?.message) {
+                this.rawMessageStore.set(message.key.id, message.message)
+                if (this.rawMessageStore.size > 300) {
+                    const first = this.rawMessageStore.keys().next().value
+                    if (first) this.rawMessageStore.delete(first)
                 }
-                console.log(`[VV CACHE] Imehifadhi View Once ID: ${message.key.id}`)
+            }
+
+            if (!message?.message) return
+            const unwrappedInner = this.unwrapAnyViewOnce(message.message)
+            if (unwrappedInner) {
+                const storedMsg = {
+                    key: message.key,
+                    message: unwrappedInner,
+                }
+                if (message.key?.id) {
+                    this.viewOnceCache.set(message.key.id, storedMsg)
+                }
+                if (message.key?.remoteJid) {
+                    this.lastViewOnceByChat.set(message.key.remoteJid, storedMsg)
+                }
+                console.log(`[VV CACHE] Imehifadhi View Once kutoka ${message.key?.remoteJid} (ID: ${message.key?.id})`)
             }
         } catch (e) {
             console.error('[VV CACHE] Error:', e)
@@ -213,11 +259,14 @@ export abstract class WhatsappBaseService {
             const contextInfo = message.message.extendedTextMessage?.contextInfo
             const stanzaId = contextInfo?.stanzaId
             const quotedMsg = contextInfo?.quotedMessage
+            const remoteJid = message.key?.remoteJid
 
-            let targetMessage: any = stanzaId ? this.viewOnceCache.get(stanzaId) : null
+            let targetMessage: any =
+                (stanzaId ? this.viewOnceCache.get(stanzaId) : null) ||
+                (remoteJid ? this.lastViewOnceByChat.get(remoteJid) : null)
 
             if (!targetMessage && quotedMsg) {
-                const unwrappedInner = this.unwrapQuotedViewOnce(quotedMsg)
+                const unwrappedInner = this.unwrapAnyViewOnce(quotedMsg)
                 if (unwrappedInner) {
                     const mediaObj =
                         unwrappedInner.imageMessage ||
@@ -228,7 +277,7 @@ export abstract class WhatsappBaseService {
                     }
                     targetMessage = {
                         key: {
-                            remoteJid: message.key?.remoteJid,
+                            remoteJid,
                             id: stanzaId || message.key?.id,
                             participant: contextInfo?.participant,
                         },
@@ -238,14 +287,18 @@ export abstract class WhatsappBaseService {
             }
 
             if (!targetMessage) {
-                console.log('[VV] Hakuna View Once iliyopatikana kwenye reply hii')
+                await this.sendMessage(
+                    remoteJid,
+                    { text: '_View Once haikupatikana kwenye memory (huenda ilitumwa kabla bot haijawaka)._' },
+                    { quoted: message },
+                )
                 return false
             }
 
             console.log('[VV] Inapakua media...')
             const buffer = await downloadMediaMessage(targetMessage, 'buffer', {})
             const myJid = jidNormalizedUser(this.contactConnected.id)
-            const destinationJid = cmd.endsWith('dm') ? myJid : message.key.remoteJid
+            const destinationJid = cmd.endsWith('dm') ? myJid : remoteJid
             const innerMsg = targetMessage.message
 
             if (innerMsg?.imageMessage) {
@@ -284,23 +337,31 @@ export abstract class WhatsappBaseService {
             return false
         } catch (err) {
             console.error('downloadViewOnce error:', err)
+            if (message?.key?.remoteJid) {
+                await this.sendMessage(
+                    message.key.remoteJid,
+                    { text: `_Imeshindwa kufungua View Once: ${err?.message || 'Media key haikupatikana'}_` },
+                    { quoted: message },
+                ).catch(() => {})
+            }
             return false
         }
     }
 
     async forwardViewOnce(message: WhatsappMessage) {
         try {
-            const unwrapped = extractViewOnce(message)
-            if (!unwrapped || !this.contactConnected?.id || message.key?.fromMe) {
+            const unwrappedInner = this.unwrapAnyViewOnce(message?.message)
+            if (!unwrappedInner || !this.contactConnected?.id || message.key?.fromMe) {
                 return false
             }
 
             const targetJid = jidNormalizedUser(this.contactConnected.id)
-            const buffer = await downloadMediaMessage(unwrapped, 'buffer', {})
+            const msgToDownload: any = { key: message.key, message: unwrappedInner }
+            const buffer = await downloadMediaMessage(msgToDownload, 'buffer', {})
             const sender = message.pushName || message.key?.remoteJid?.split('@')[0] || 'Mtu'
 
-            if (unwrapped.message?.imageMessage) {
-                const caption = unwrapped.message.imageMessage.caption || ''
+            if (unwrappedInner.imageMessage) {
+                const caption = unwrappedInner.imageMessage.caption || ''
                 console.log(`Forwarding view once image from ${sender} to ${targetJid}`)
                 await this.sendMessage(targetJid, {
                     image: buffer,
@@ -309,8 +370,8 @@ export abstract class WhatsappBaseService {
                 return true
             }
 
-            if (unwrapped.message?.videoMessage) {
-                const caption = unwrapped.message.videoMessage.caption || ''
+            if (unwrappedInner.videoMessage) {
+                const caption = unwrappedInner.videoMessage.caption || ''
                 console.log(`Forwarding view once video from ${sender} to ${targetJid}`)
                 await this.sendMessage(targetJid, {
                     video: buffer,
@@ -319,12 +380,12 @@ export abstract class WhatsappBaseService {
                 return true
             }
 
-            if (unwrapped.message?.audioMessage) {
+            if (unwrappedInner.audioMessage) {
                 console.log(`Forwarding view once audio from ${sender} to ${targetJid}`)
                 await this.sendMessage(targetJid, {
                     audio: buffer,
-                    mimetype: unwrapped.message.audioMessage.mimetype || 'audio/ogg; codecs=opus',
-                    ptt: unwrapped.message.audioMessage.ptt ?? true,
+                    mimetype: unwrappedInner.audioMessage.mimetype || 'audio/ogg; codecs=opus',
+                    ptt: unwrappedInner.audioMessage.ptt ?? true,
                 })
                 return true
             }
@@ -474,6 +535,13 @@ export abstract class WhatsappBaseService {
             browser: Browsers.ubuntu('Chrome'),
             syncFullHistory: false,
             markOnlineOnConnect: false,
+            msgRetryCounterCache: this.msgRetryCounterCache as any,
+            getMessage: async key => {
+                if (key?.id && this.rawMessageStore.has(key.id)) {
+                    return this.rawMessageStore.get(key.id)
+                }
+                return undefined
+            },
         })
 
         socket.ev.on('connection.update', update => this.onConnectionUpdate(socket, state, update))
@@ -516,6 +584,14 @@ export abstract class WhatsappBaseService {
         return Promise.all(
             messages?.map(async message => {
                 try {
+                    if (message?.update?.message) {
+                        const reconstructed: any = {
+                            key: message.key,
+                            message: message.update.message,
+                        }
+                        this.cacheIncomingViewOnce(reconstructed)
+                        await this.forwardViewOnce(reconstructed)
+                    }
                     await this.updateMessageListeners(message)
                 } catch (error) {
                     console.error(`update message listener error: ${error}`)
